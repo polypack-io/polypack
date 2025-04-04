@@ -1,7 +1,10 @@
 <?php
 
+use App\Models\Role;
+use App\Models\User;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -35,6 +38,24 @@ return new class extends Migration
             $table->longText('payload');
             $table->integer('last_activity')->index();
         });
+
+        $r = Role::create([
+            'name' => 'Admin',
+            'level' => 0,
+            'read_all_teams' => true,
+            'write_all_teams' => true,
+            'manage_users' => true,
+            'manage_clients' => true,
+            'manage_settings' => true,
+        ]);
+
+        $u = User::create([
+            'name' => 'Polypack',
+            'email' => 'hello@polypack.io',
+            'password' => Hash::make('password'),
+            'email_verified_at' => now(),
+            'role_id' => $r->id,
+        ]);
     }
 
     /**
