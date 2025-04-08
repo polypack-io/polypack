@@ -1,0 +1,194 @@
+services:
+    traefik:
+        image: "traefik:v3.3"
+        container_name: "traefik"
+        command:
+            - "--log.level=DEBUG"
+            - "--accesslog=true"
+            - "--accesslog.addinternals"
+            - "--api=true"
+            - "--api.insecure=true"
+            - "--providers.docker=true"
+            - "--providers.docker.exposedbydefault=false"
+            - "--entryPoints.web.address=:${DOCKER_EXPOSED_HTTP_PORT:-80}"
+            - "--entryPoints.websecure.address=:${DOCKER_EXPOSED_HTTPS_PORT:-443}"
+            - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+            - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+            # Enable using the letsencrypt staging environment for testing
+            # - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+            - "--certificatesresolvers.letsencrypt.acme.email=${DOCKER_SSL_ACME_EMAIL}"
+            - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+        ports:
+            - "${DOCKER_APP_HTTP_PORT:-80}:80"
+            - "${DOCKER_APP_HTTPS_PORT:-443}:443"
+        volumes:
+            - "/var/run/docker.sock:/var/run/docker.sock:ro"
+            - "polypack-letsencrypt:/letsencrypt"
+        networks:
+            - polypack
+
+    # We'll reuse the pre-built Laravel image for web, Reverb and Horizon
+    polypack-base: &polypack-base
+        build:
+            context: .
+            dockerfile: Dockerfile
+
+    polypack-web:
+        <<: *polypack-base
+        restart: always
+        environment:
+            WWWUSER: '${WWWUSER}'
+            WWWGROUP: '${WWWGROUP}'
+            PHP_OPCACHE_ENABLE: 1
+            SSL_MODE: "off"
+            AUTORUN_ENABLED: true
+            AUTORUN_LARAVEL_VIEW_CACHE: false
+        depends_on:
+            - pgsql
+            - valkey
+            - typesense
+            - mailpit
+            - minio
+        networks:
+            - polypack
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.polypack-web.tls=true"
+            - "traefik.http.routers.polypack-web.tls.certResolver=letsencrypt"
+            - "traefik.http.routers.polypack-web.entrypoints=websecure"
+            - "traefik.http.routers.polypack-web.rule=Host(`${DOCKER_DOMAIN_WEB}`)"
+            - "traefik.http.services.polypack-web.loadbalancer.server.port=8080"
+            - "traefik.http.services.polypack-web.loadbalancer.server.scheme=http"
+    polypack-queue:
+        <<: *polypack-base
+        restart: always
+        command: ["php", "/var/www/html/artisan", "queue:work", "--tries=3"]
+        stop_signal: SIGTERM # Set this for graceful shutdown if you're using fpm-apache or fpm-nginx
+        environment:
+            WWWUSER: '${WWWUSER}'
+            WWWGROUP: '${WWWGROUP}'
+            PHP_OPCACHE_ENABLE: 1
+        depends_on:
+            - pgsql
+            - valkey
+            - typesense
+            - mailpit
+            - minio
+        networks:
+            - polypack
+        healthcheck:
+            test: ["CMD", "healthcheck-queue"]
+            start_period: 10s
+    pgsql:
+        image: 'postgres:17'
+        restart: always
+        environment:
+            PGPASSWORD: '${DB_PASSWORD:-secret}'
+            POSTGRES_DB: '${DB_DATABASE}'
+            POSTGRES_USER: '${DB_USERNAME}'
+            POSTGRES_PASSWORD: '${DB_PASSWORD:-secret}'
+        volumes:
+            - 'polypack-pgsql:/var/lib/postgresql/data'
+        networks:
+            - polypack
+        healthcheck:
+            test:
+                - CMD
+                - pg_isready
+                - '-q'
+                - '-d'
+                - '${DB_DATABASE}'
+                - '-U'
+                - '${DB_USERNAME}'
+            retries: 3
+            timeout: 5s
+    valkey:
+        image: 'valkey/valkey:alpine'
+        restart: always
+        volumes:
+            - 'polypack-valkey:/data'
+        networks:
+            - polypack
+        healthcheck:
+            test:
+                - CMD
+                - valkey-cli
+                - ping
+            retries: 3
+            timeout: 5s
+    typesense:
+        image: 'typesense/typesense:27.1'
+        restart: always
+        environment:
+            TYPESENSE_DATA_DIR: '${TYPESENSE_DATA_DIR:-/typesense-data}'
+            TYPESENSE_API_KEY: '${TYPESENSE_API_KEY:-xyz}'
+            TYPESENSE_ENABLE_CORS: '${TYPESENSE_ENABLE_CORS:-true}'
+        volumes:
+            - 'polypack-typesense:/typesense-data'
+        networks:
+            - polypack
+        healthcheck:
+            test:
+                - CMD
+                - wget
+                - '--no-verbose'
+                - '--spider'
+                - 'http://localhost:8108/health'
+            retries: 5
+            timeout: 7s
+    mailpit:
+        image: 'axllent/mailpit:latest'
+        restart: always
+        networks:
+            - polypack
+    minio:
+        image: 'minio/minio:latest'
+        restart: always
+        environment:
+            MINIO_ROOT_USER: polypack
+            MINIO_ROOT_PASSWORD: password
+        volumes:
+            - 'polypack-minio:/data'
+        networks:
+            - polypack
+        command: 'minio server /data --console-address ":8900"'
+        healthcheck:
+            test:
+                - CMD
+                - mc
+                - ready
+                - local
+            retries: 3
+            timeout: 5s
+        labels:
+            # For use with SDKs
+            - "traefik.enable=true"
+            - "traefik.http.routers.polypack-minio-api.tls=true"
+            - "traefik.http.routers.polypack-minio-api.tls.certResolver=letsencrypt"
+            - "traefik.http.routers.polypack-minio-api.entrypoints=websecure"
+            - "traefik.http.routers.polypack-minio-api.rule=Host(`${DOCKER_DOMAIN_MINIO_API}`)"
+            - "traefik.http.routers.polypack-minio-api.service=polypack-minio-api"
+            - "traefik.http.services.polypack-minio-api.loadbalancer.server.port=9000"
+            - "traefik.http.services.polypack-minio-api.loadbalancer.server.scheme=http"
+            # For accessing the console UI
+            - "traefik.http.routers.polypack-minio-console.tls=true"
+            - "traefik.http.routers.polypack-minio-console.tls.certResolver=letsencrypt"
+            - "traefik.http.routers.polypack-minio-console.entrypoints=websecure"
+            - "traefik.http.routers.polypack-minio-console.rule=Host(`${DOCKER_DOMAIN_MINIO_CONSOLE}`)"
+            - "traefik.http.routers.polypack-minio-console.service=polypack-minio-console"
+            - "traefik.http.services.polypack-minio-console.loadbalancer.server.port=8900"
+            - "traefik.http.services.polypack-minio-console.loadbalancer.server.scheme=http"
+networks:
+    polypack:
+        driver: bridge
+volumes:
+    polypack-letsencrypt:
+        driver: local
+    polypack-pgsql:
+        driver: local
+    polypack-valkey:
+        driver: local
+    polypack-typesense:
+        driver: local
+    polypack-minio:
+        driver: local
