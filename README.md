@@ -41,6 +41,9 @@ Open-source project with the flexibility to adapt to your unique requirements.
 | **PyPI**          | 🚧 Planned |
 | More Coming Soon  | [Request a provider](https://github.com/polypack-io/polypack/issues)  |
 
+## Using Polypack
+[See our installation documentation here](https://polypack.io/docs/installation/)
+
 ## Branching
 
 We use [git-flow](https://nvie.com/posts/a-successful-git-branching-model/) to maintain a standard workflow across developers. Our base branch is "develop". See "main" for the latest stable release, and specific version tags for anything older.
